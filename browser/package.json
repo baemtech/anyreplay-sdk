@@ -1,0 +1,58 @@
+{
+  "name": "@anyreplay/browser",
+  "version": "0.1.2",
+  "description": "Session replay recorder for the browser: DOM-based recording with input masking on by default, custom events, and chunked delivery to AnyReplay.",
+  "license": "MIT",
+  "homepage": "https://anyreplay.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/baemtech/anyreplay-sdk.git",
+    "directory": "browser"
+  },
+  "bugs": {
+    "url": "https://github.com/baemtech/anyreplay-sdk/issues"
+  },
+  "keywords": [
+    "session-replay",
+    "session-recording",
+    "rrweb",
+    "analytics",
+    "user-research",
+    "anyreplay"
+  ],
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "!dist/cdn",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup",
+    "size": "node scripts/size.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "jsdom": "25.0.1",
+    "tsup": "8.3.5",
+    "typescript": "5.8.3",
+    "vitest": "2.1.8",
+    "rrweb": "2.0.0-alpha.4"
+  }
+}

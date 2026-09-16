@@ -1,0 +1,72 @@
+{
+  "name": "@anyreplay/react-native",
+  "version": "0.1.2",
+  "description": "Session replay for React Native: records the committed element tree, not pixels, and ships it to AnyReplay.",
+  "license": "MIT",
+  "homepage": "https://anyreplay.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/baemtech/anyreplay-sdk.git",
+    "directory": "react-native"
+  },
+  "bugs": {
+    "url": "https://github.com/baemtech/anyreplay-sdk/issues"
+  },
+  "keywords": [
+    "session-replay",
+    "react-native",
+    "expo",
+    "analytics",
+    "anyreplay"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "react-native": "./dist/index.cjs",
+      "browser": "./dist/index.cjs",
+      "node": "./dist/index.cjs",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-native": ">=0.72"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "react-native": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "19.2.18",
+    "@types/react-test-renderer": "19.1.0",
+    "react": "19.2.8",
+    "react-native": "0.76.9",
+    "react-test-renderer": "19.2.8",
+    "tsup": "8.3.5",
+    "typescript": "5.8.3",
+    "vitest": "2.1.8"
+  },
+  "react-native": "./dist/index.cjs"
+}
