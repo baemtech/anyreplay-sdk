@@ -1,0 +1,63 @@
+{
+  "name": "@anyreplay/cordova",
+  "version": "0.2.0",
+  "description": "Session replay for Cordova apps: records the app's web view with @anyreplay/browser, plus the app id, version, lifecycle flushing, durable storage and the app's own styles, fonts and images.",
+  "license": "MIT",
+  "homepage": "https://anyreplay.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/baemtech/anyreplay-sdk.git",
+    "directory": "cordova"
+  },
+  "bugs": {
+    "url": "https://github.com/baemtech/anyreplay-sdk/issues"
+  },
+  "keywords": [
+    "cordova",
+    "ecosystem:cordova",
+    "cordova-android",
+    "cordova-ios",
+    "session-replay",
+    "anyreplay"
+  ],
+  "cordova": {
+    "id": "@anyreplay/cordova",
+    "platforms": [
+      "android",
+      "ios"
+    ]
+  },
+  "types": "./types/index.d.ts",
+  "files": [
+    "plugin.xml",
+    "dist/anyreplay.js",
+    "native",
+    "types",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "cordovaDependencies": {
+      "0.1.0": {
+        "cordova-android": ">=10.0.0",
+        "cordova-ios": ">=6.0.0"
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@anyreplay/browser": "workspace:*",
+    "@anyreplay/capacitor": "workspace:*",
+    "jsdom": "25.0.1",
+    "tsup": "8.3.5",
+    "typescript": "5.8.3",
+    "vitest": "2.1.8"
+  }
+}

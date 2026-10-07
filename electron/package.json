@@ -1,0 +1,76 @@
+{
+  "name": "@anyreplay/electron",
+  "version": "0.2.0",
+  "description": "Session replay for Electron apps: records each window with the AnyReplay browser SDK, reports the app's id and version, and flushes before the app quits.",
+  "license": "MIT",
+  "homepage": "https://anyreplay.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/baemtech/anyreplay-sdk.git",
+    "directory": "electron"
+  },
+  "bugs": {
+    "url": "https://github.com/baemtech/anyreplay-sdk/issues"
+  },
+  "keywords": [
+    "session-replay",
+    "session-recording",
+    "electron",
+    "desktop",
+    "anyreplay"
+  ],
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./preload": {
+      "types": "./dist/preload.d.ts",
+      "import": "./dist/preload.js",
+      "require": "./dist/preload.cjs"
+    },
+    "./main": {
+      "types": "./dist/main.d.ts",
+      "import": "./dist/main.js",
+      "require": "./dist/main.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@anyreplay/browser": "workspace:^"
+  },
+  "peerDependencies": {
+    "electron": ">=28"
+  },
+  "peerDependenciesMeta": {
+    "electron": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "electron": "38.8.6",
+    "jsdom": "25.0.1",
+    "tsup": "8.3.5",
+    "typescript": "5.8.3",
+    "vitest": "2.1.8"
+  }
+}
