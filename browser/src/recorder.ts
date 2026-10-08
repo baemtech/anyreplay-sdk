@@ -1,0 +1,581 @@
+import { record } from 'rrweb';
+import { ASSET_TAG, AssetCollector, localAssetPrefix } from './assets.js';
+import type { AnyReplayOptions, ResolvedOptions } from './config.js';
+import { resolveOptions } from './config.js';
+import { ERROR_TAG, errorPayload, startDiagnostics, type DiagnosticsHandle } from './diagnostics.js';
+import { NAVIGATE_TAG, TRACK_TAG, validateTrack } from './events.js';
+import { MASK_EVERY_FIELD, MASK_SENSITIVE_FIELDS, scrubEvent, type MaskingPolicy } from './masking.js';
+import { isSampledIn } from './sampling.js';
+import { Transport, type RecordedEvent, type SessionMeta } from './transport.js';
+import { PLATFORM, SDK_NAME, SDK_VERSION } from './version.js';
+import {
+  forgetVisitor, inCooldown, notePageCount, resolveIdentity, reserveSeq, safeStorage, startCooldown, touchSession,
+  type Identity,
+} from './visitor.js';
+
+/**
+ * What an SDK that wraps this one says about the app the page runs in.
+ *
+ * Not an option: a website never has one. `@anyreplay/capacitor`,
+ * `@anyreplay/cordova` and the desktop shells pass it as `createRecorder`'s
+ * second argument, so a session names the SDK that was installed and the
+ * platform it runs on (contract §2.3–§2.5) while the recording itself — rrweb,
+ * masking, transport — stays this package's, unchanged (contract §4).
+ */
+export interface ShellInfo {
+  /** One of the web family's platforms: `capacitor`, `cordova`, `electron`, `tauri`. */
+  platform: string;
+  /** The wrapper's own npm name and version. */
+  sdk: { name: string; version: string };
+  /** The app's user-visible version (`CFBundleShortVersionString`, `versionName`), ≤ 40. */
+  appVersion?: string;
+  /** The hardware model (`iPhone15,2`, `Pixel 8`), ≤ 64. */
+  deviceModel?: string;
+  /**
+   * Called the moment a chunk number is reserved, before the request that
+   * uses it leaves. A shell that copies the recorder's keys into native
+   * storage copies them then: an app killed between a send and the shell's
+   * next periodic copy came back with the old number, and sent its first
+   * chunk under a number the server already held (seen on an iOS simulator).
+   */
+  onStateChanged?: () => void;
+}
+
+export type RecorderStatus = 'idle' | 'awaiting-consent' | 'recording' | 'sampled-out' | 'stopped';
+
+export interface IdentifyTraits {
+  userId?: string;
+  email?: string;
+}
+
+export interface RecorderHandle {
+  status: () => RecorderStatus;
+  sessionId: () => string | null;
+  consent: (granted: boolean) => void;
+  identify: (traits: IdentifyTraits) => void;
+  /**
+   * Tags this moment of the recording so it shows on the player's timeline.
+   *
+   * `name` is 1–64 characters of `[A-Za-z0-9_.:-]`; `properties` must be a
+   * plain JSON object of at most 4 KB. Anything else is dropped with a warning
+   * in debug mode — never an exception, since this runs inside the page's
+   * own handlers.
+   */
+  track: (name: string, properties?: Record<string, unknown>) => void;
+  /**
+   * Records an error the page caught itself — a failed checkout handled with a
+   * message, an error another tracker saw first — as the same `anyreplay.error`
+   * event an uncaught one becomes: redacted by the same rules, counted against
+   * the same ceiling, and setting the session's `hasError`. Accepts anything
+   * that can be thrown. Ignored with `recordErrors: false`. Before recording
+   * starts it is held like `track` and still flags the session once it does.
+   */
+  trackError: (error: unknown) => void;
+  stop: () => void;
+  flush: () => Promise<void>;
+}
+
+/** Rage click: several clicks in nearly the same spot in quick succession. */
+/** rrweb's `EventType.DomContentLoaded` and `EventType.Load`: page milestones with no data. */
+const RRWEB_DOM_CONTENT_LOADED = 0;
+const RRWEB_LOAD = 1;
+
+const RAGE_CLICK_COUNT = 3;
+const RAGE_CLICK_WINDOW_MS = 1000;
+const RAGE_CLICK_RADIUS_PX = 30;
+
+/**
+ * Events tracked before rrweb is emitting — while consent is pending, or
+ * while the document is still loading — wait here. Enough for an app's boot
+ * sequence; a page that tracks more than this before anything is recorded is
+ * looping, and keeping the oldest ones tells the story better than the newest.
+ */
+const MAX_PENDING_EVENTS = 32;
+
+/**
+ * Everywhere a person can type that is not a form control.
+ *
+ * A `contenteditable` element's text is page text, not an input value, so
+ * input masking never sees it — which is why `maskAllTyping` exists and why it
+ * is expressed as a text selector. `contenteditable="false"` is how a page
+ * marks a part of an editor that cannot be edited (a mention chip, an embed),
+ * so it is not itself a reason to mask; text inside it is still masked when an
+ * editable ancestor is, which is the safe way round.
+ */
+const EDITABLE_SELECTOR = '[contenteditable]:not([contenteditable="false"])';
+
+export function createRecorder(rawOptions: AnyReplayOptions, shell?: ShellInfo): RecorderHandle {
+  const options: ResolvedOptions = resolveOptions(rawOptions);
+
+  const local = safeStorage(() => globalThis.localStorage);
+  const session = safeStorage(() => globalThis.sessionStorage);
+
+  let status: RecorderStatus = 'idle';
+  /**
+   * Who this is, and the channel to ingest. Neither exists until the recorder
+   * is allowed to record — see `begin`. With `requireConsent` that is the
+   * moment `consent(true)` is called; otherwise it is right now.
+   */
+  let identity: Identity | undefined;
+  let transport: Transport | undefined;
+  let stopRecording: (() => void) | undefined;
+  /** Patched globals wait here to be put back; see `diagnostics.ts`. */
+  let diagnostics: DiagnosticsHandle | undefined;
+  /** With `assets: 'inline'`: makes the app's own files part of the recording. */
+  let assets: AssetCollector | undefined;
+  let pageCount = 0;
+  /**
+   * Traits given to `identify` before there was a session to attach them to.
+   * Held in memory only, and sent the moment recording starts — so
+   * `consent(true)` followed by `identify` on the next line works, and an
+   * identity never leaves the page for a visitor who has not agreed.
+   */
+  let pendingTraits: IdentifyTraits | undefined;
+
+  const sendIdentity = (who: Identity, traits: IdentifyTraits): void => {
+    void fetch(`${options.ingestUrl}/v1/ingest/identify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'omit',
+      body: JSON.stringify({
+        projectKey: options.projectKey, sessionId: who.sessionId, ...traits,
+        ...(options.appId ? { appId: options.appId } : {}),
+      }),
+    }).catch(() => { /* identity is best-effort; never surface to the page */ });
+  };
+
+  const collectMeta = (who: Identity): SessionMeta => ({
+    startedAt: Date.now(),
+    url: safeLocation(),
+    lang: typeof navigator !== 'undefined' ? navigator.language : undefined,
+    userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
+    screenWidth: typeof window !== 'undefined' ? window.innerWidth : undefined,
+    screenHeight: typeof window !== 'undefined' ? window.innerHeight : undefined,
+    referrer: typeof document !== 'undefined' ? document.referrer || undefined : undefined,
+    platform: shell?.platform ?? PLATFORM,
+    sdk: shell?.sdk ?? { name: SDK_NAME, version: SDK_VERSION },
+    ...(shell?.appVersion ? { appVersion: shell.appVersion.slice(0, 40) } : {}),
+    ...(shell?.deviceModel ? { deviceModel: shell.deviceModel.slice(0, 64) } : {}),
+    // The cap is a decision about starting a session, so it goes only where
+    // ingest makes that decision: chunk 0. A resumed page starts later.
+    ...(options.maxSessionsPerMonth !== undefined && who.nextSeq === 0
+      ? { sessionCap: options.maxSessionsPerMonth }
+      : {}),
+  });
+
+  const recentClicks: { x: number; y: number; t: number }[] = [];
+
+  const noteInteraction = (event: RecordedEvent, channel: Transport): void => {
+    // rrweb IncrementalSnapshot(3) with MouseInteraction(2) source carries clicks,
+    // but it also carries the mousedown and mouseup around each of them — one
+    // ordinary click is three interactions, which is exactly RAGE_CLICK_COUNT,
+    // and every session with a single click was being flagged as rage. Only
+    // the Click itself (interaction type 2) is a click. A tap on a phone
+    // fires one as well, so touch devices are still counted.
+    const data = event.data as { source?: number; type?: number; x?: number; y?: number } | undefined;
+    if (event.type !== 3 || data?.source !== 2 || data.type !== 2 || typeof data.x !== 'number') return;
+
+    const now = event.timestamp;
+    recentClicks.push({ x: data.x, y: data.y ?? 0, t: now });
+    while (recentClicks.length > 0 && now - recentClicks[0]!.t > RAGE_CLICK_WINDOW_MS) recentClicks.shift();
+
+    // Counted around the click that just landed, not around the oldest one in
+    // the window: a single click somewhere else a moment earlier must not hide
+    // the burst that follows it on the button that is not answering.
+    const near = recentClicks.filter(
+      (c) => Math.abs(c.x - data.x!) < RAGE_CLICK_RADIUS_PX && Math.abs(c.y - (data.y ?? 0)) < RAGE_CLICK_RADIUS_PX,
+    );
+    if (near.length >= RAGE_CLICK_COUNT) channel.mergeFlags({ hasRageClick: true });
+  };
+
+  /* ----------------------------- custom events ---------------------------- */
+
+  const pending: { tag: string; payload: unknown }[] = [];
+  let draining = false;
+  let drainScheduled = false;
+
+  /**
+   * Hands the queue of waiting events to rrweb, in order.
+   *
+   * `addCustomEvent` throws until rrweb has finished its first snapshot,
+   * which it takes on `load` when the recorder starts in a still-loading
+   * document — and it flips to accepting only after the snapshot's own
+   * events have been emitted, so draining from inside `emit` can be refused
+   * too. A refusal is retried on the next event and, in case no event comes,
+   * on a timer. A queued event is stamped with the time it is handed over,
+   * not the time `track` was called: a marker a few hundred milliseconds late
+   * is still on the timeline, and one dated before the snapshot is not.
+   */
+  const drainPending = (): void => {
+    if (draining || pending.length === 0) return;
+    draining = true;
+    try {
+      while (pending.length > 0) {
+        const next = pending[0]!;
+        record.addCustomEvent(next.tag, next.payload);
+        pending.shift();
+        // An error held from before recording started flags the session as
+        // one caught now would (contract §3.5, §8.3).
+        if (next.tag === ERROR_TAG) transport?.mergeFlags({ hasError: true });
+      }
+    } catch {
+      if (!drainScheduled && status === 'recording') {
+        drainScheduled = true;
+        setTimeout(() => { drainScheduled = false; drainPending(); }, 50);
+      }
+    } finally {
+      draining = false;
+    }
+  };
+
+  /**
+   * The queue lives in memory only. An event tracked while consent is
+   * pending must not leave a trace anywhere a refusal would have to clean up.
+   */
+  const emitCustom = (tag: string, payload: unknown): void => {
+    if (status === 'stopped' || status === 'sampled-out') return;
+    if (status === 'recording') {
+      try {
+        record.addCustomEvent(tag, payload);
+        return;
+      } catch {
+        /* not emitting yet — queue it */
+      }
+    }
+    if (pending.length >= MAX_PENDING_EVENTS) {
+      if (options.debug) console.warn(`[anyreplay] dropped ${tag}: too many events before recording started`);
+      return;
+    }
+    pending.push({ tag, payload });
+  };
+
+  /* ------------------------------ navigation ------------------------------ */
+
+  let lastUrl: string | undefined;
+
+  /**
+   * A route change in a single-page app is a page view.
+   *
+   * rrweb records the DOM mutations that come with it, but nothing in the
+   * stream says "this is a new page" — so the marker is emitted here, and
+   * ingest indexes it for the player. Same-URL changes are ignored: routers
+   * call `replaceState` for scroll positions and query tweaks, and each of
+   * those is not a page.
+   */
+  const noteNavigation = (channel: Transport): void => {
+    const url = safeLocation();
+    if (!url || url === lastUrl) return;
+    lastUrl = url;
+    pageCount += 1;
+    notePageCount(session, pageCount);
+    channel.mergeFlags({ pageCount });
+    emitCustom(NAVIGATE_TAG, { url, title: typeof document !== 'undefined' ? document.title : '' });
+  };
+
+  /**
+   * Everything that leaves a trace happens here, and nothing before it.
+   *
+   * Resolving the identity writes the visitor id to `localStorage` and the
+   * session to `sessionStorage`; opening the transport is what makes a request
+   * possible; starting rrweb is what observes the page. With `requireConsent`
+   * every one of those waits for `consent(true)`, because storing an
+   * identifier on the device is the very thing the consent is for. Nor does
+   * the recorder peek at an id an earlier page left behind to decide that
+   * consent was already given: the id may predate a refusal — the visitor
+   * accepted in May and rejected in June — or have been written by a version
+   * of this recorder that stored it without asking. Only the page knows the
+   * current answer, and it says so by calling `consent`.
+   *
+   * Sampling is still decided from the visitor id, so it is still the same
+   * answer for the same visitor on every page. What moves is *when* it is
+   * decided: a visitor is sampled on first consent rather than on first page
+   * view, and a visitor who refuses is forgotten, so a later acceptance is a
+   * fresh draw.
+   */
+  const begin = (): void => {
+    if (status !== 'idle' && status !== 'awaiting-consent') return;
+
+    const who = resolveIdentity(local, session);
+    identity = who;
+    pageCount = who.pageCount;
+
+    if (!isSampledIn(who.visitorId, options.sampleRate)) {
+      // Decided from the visitor id, so this answer is stable across pages.
+      status = 'sampled-out';
+      return;
+    }
+
+    if (inCooldown(session)) {
+      // The previous page was told this session may not be started. That answer
+      // will not have changed a page load later.
+      status = 'stopped';
+      if (options.debug) console.warn('[anyreplay] not recording: ingest refused a new session recently');
+      return;
+    }
+
+    const channel = new Transport(
+      options,
+      {
+        projectKey: options.projectKey,
+        sessionId: who.sessionId,
+        visitorId: who.visitorId,
+        initialSeq: who.nextSeq,
+      },
+      {
+        onSeqReserved: (next) => {
+          reserveSeq(session, next);
+          try { shell?.onStateChanged?.(); } catch { /* the shell's problem, never the recording's */ }
+        },
+        onStopped: (reason) => {
+          status = 'stopped';
+          stopRecording?.();
+          stopRecording = undefined;
+          diagnostics?.stop();
+          diagnostics = undefined;
+          assets?.stop();
+          assets = undefined;
+          // Only the verdict about the session itself is remembered across pages.
+          // A transport failure or an origin problem is either transient or one
+          // request per page load to notice it is fixed; a full quota is neither.
+          if (reason === 'rejected_402') startCooldown(session);
+          if (options.debug) console.warn(`[anyreplay] recording stopped: ${reason}`);
+        },
+        onWarning: (message) => {
+          if (options.debug) console.warn(`[anyreplay] ${message}`);
+        },
+        // Events were dropped (a long outage, or one too large to send), so
+        // the DOM changes after the gap describe nodes ingest never got. A
+        // fresh full snapshot starts the page over. Taken on the next turn,
+        // not here: this can be called from inside rrweb's own emit, in the
+        // middle of handing over a batch of mutations.
+        onResyncNeeded: () => setTimeout(() => takeSnapshot(2), 0),
+      },
+    );
+    transport = channel;
+    status = 'recording';
+
+    /** A checkout snapshot (Meta + FullSnapshot), retried briefly if rrweb is not emitting yet. */
+    const takeSnapshot = (triesLeft: number): void => {
+      if (status !== 'recording' || !stopRecording) return;
+      try {
+        record.takeFullSnapshot(true);
+      } catch {
+        if (triesLeft > 0) setTimeout(() => takeSnapshot(triesLeft - 1), 1000);
+      }
+    };
+    // The page the recording starts on is where route changes are counted from.
+    lastUrl = safeLocation();
+
+    channel.setMeta(collectMeta(who));
+    // The page the recorder starts on is a page view. Without this the
+    // counter only ever reflects in-app navigations, so a single-page visit
+    // reports zero pages — and on a resumed session it is the previous page's
+    // count plus one, so the hop is visible.
+    channel.mergeFlags({ pageCount });
+    channel.start();
+
+    /**
+     * What this recording may contain.
+     *
+     * `maskAllTyping` is the stricter of the two options and wins: a page that
+     * asked for everything typed to be hidden does not get form fields back
+     * because `maskAllInputs: false` is also set. With neither on, values are
+     * recorded and `masking.ts` applies the floor — the fields no option can
+     * un-mask.
+     */
+    const prefix = options.assets === 'inline' ? localAssetPrefix() : null;
+    if (prefix && typeof fetch === 'function') {
+      assets = new AssetCollector({
+        prefix,
+        ingestUrl: options.ingestUrl,
+        projectKey: options.projectKey,
+        appId: options.appId,
+        // Bound now, before the network diagnostics wrap `fetch`: reading the
+        // app's own files is the recorder's business, not the app's traffic.
+        fetch: fetch.bind(globalThis),
+        emit: (payload) => emitCustom(ASSET_TAG, payload),
+        debug: options.debug,
+      });
+    }
+
+    const policy: MaskingPolicy = {
+      maskEveryField: options.maskAllInputs || options.maskAllTyping,
+      maskClass: options.maskClass,
+    };
+
+    stopRecording = record({
+      emit: (event) => {
+        const typed = event as unknown as RecordedEvent;
+        // Started before the page finished loading, rrweb announces
+        // DOMContentLoaded (0) and load (1) as events of their own. They carry
+        // nothing a replay uses, and they would open the recording ahead of
+        // its Meta (contract §5.1, SEQ-002).
+        if (typed.type === RRWEB_DOM_CONTENT_LOADED || typed.type === RRWEB_LOAD) return;
+        // Before anything else touches the event: rrweb's own masking is
+        // all-or-nothing by input type, so the floor — payment fields, marked
+        // fields, anything shaped like a card number — is applied here, to the
+        // event, with the node resolved through rrweb's mirror.
+        scrubEvent(typed, (id) => record.mirror.getNode(id) as never, policy);
+        assets?.scan(typed);
+        noteInteraction(typed, channel);
+        touchSession(session, typed.timestamp);
+        channel.push(typed);
+        drainPending();
+      },
+      maskInputOptions: (policy.maskEveryField
+        ? MASK_EVERY_FIELD
+        : MASK_SENSITIVE_FIELDS) as NonNullable<Parameters<typeof record>[0]>['maskInputOptions'],
+      maskTextClass: options.maskClass,
+      maskTextSelector: options.maskAllTyping ? EDITABLE_SELECTOR : undefined,
+      blockClass: options.blockClass,
+      // Readable stylesheets go into the snapshot as text, in both asset
+      // modes. rrweb's default, written out because 'inline' depends on it.
+      inlineStylesheet: true,
+      // Canvas capture is expensive and off unless a customer opts in later.
+      recordCanvas: false,
+      collectFonts: false,
+    });
+    // Every page begins with a full snapshot (rrweb takes one on start), so
+    // events tracked before this point land right after it.
+    drainPending();
+    if (pendingTraits) {
+      sendIdentity(who, pendingTraits);
+      pendingTraits = undefined;
+    }
+
+    attachLifecycleHooks(channel);
+  };
+
+  const attachLifecycleHooks = (channel: Transport): void => {
+    if (typeof window === 'undefined') return;
+
+    // pagehide is the reliable end-of-page signal; unload does not fire on
+    // mobile Safari and beforeunload breaks the back/forward cache.
+    window.addEventListener('pagehide', () => { channel.flushWithBeacon(true); }, { capture: true });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') channel.flushWithBeacon();
+      // Back on screen: if deliveries were failing, try now rather than at
+      // the end of a backoff that may have been running while it was hidden.
+      else channel.resume();
+    });
+    // The connection is back. `online` can fire for a network that still
+    // reaches nothing; then the attempt fails and backs off again.
+    window.addEventListener('online', () => channel.resume());
+    /*
+     * Errors, console lines and request metadata.
+     *
+     * This replaces two bare listeners that set `hasError` and kept nothing
+     * else, which is why a replay could say an error happened and never say
+     * which. `hasError` is still set — by the first error or failed request
+     * either stream sees, through `onError` — so the session list's filter and
+     * its partial index are unchanged.
+     *
+     * Started here rather than in `begin()` so that nothing is patched before
+     * consent: `attachLifecycleHooks` runs once recording has actually
+     * started, and `stop()` puts every global back.
+     */
+    diagnostics = startDiagnostics({
+      errors: options.recordErrors,
+      console: options.recordConsole,
+      network: options.recordNetwork,
+      ingestUrl: options.ingestUrl,
+      emit: emitCustom,
+      onError: () => channel.mergeFlags({ hasError: true }),
+    });
+
+    // Wrapped after the original runs, so `location` already shows the new URL.
+    const patch = (method: 'pushState' | 'replaceState'): void => {
+      const original = history[method].bind(history);
+      history[method] = function patched(...args: Parameters<History['pushState']>) {
+        const result = original(...args);
+        noteNavigation(channel);
+        return result;
+      };
+    };
+    patch('pushState');
+    patch('replaceState');
+    window.addEventListener('popstate', () => noteNavigation(channel));
+  };
+
+  if (options.requireConsent) {
+    status = 'awaiting-consent';
+  } else {
+    begin();
+  }
+
+  return {
+    status: () => status,
+    sessionId: () => identity?.sessionId ?? null,
+    consent: (granted) => {
+      if (granted) {
+        begin();
+        return;
+      }
+      // A refusal stops this page's recording and undoes what an earlier
+      // acceptance stored — on this page or on one last month. Stopping
+      // first, so no flush reserves a chunk number after the keys are gone.
+      transport?.stop('consent_withdrawn');
+      // Nothing was recording yet (still asking, or asked and sampled out):
+      // the refusal is an answer, not a `stop()`. The recorder goes back to
+      // waiting, so a visitor who says no and then changes their mind on the
+      // same page — the banner's settings link — is recorded from then on, as
+      // a new visitor with a fresh sampling draw (contract §3.5). A recording
+      // that had started stays stopped for the page (§3.6).
+      if (status === 'idle' || status === 'awaiting-consent' || status === 'sampled-out') {
+        status = 'awaiting-consent';
+        identity = undefined;
+      }
+      pendingTraits = undefined;
+      // What was tracked while asking belongs to the answer that was refused.
+      pending.length = 0;
+      forgetVisitor(local, session);
+    },
+    identify: (traits) => {
+      if (!traits.userId && !traits.email) return;
+      if (identity && transport) {
+        sendIdentity(identity, traits);
+        return;
+      }
+      // No session yet. While consent is pending the traits wait; a visitor
+      // who is sampled out or stopped has no session to attach them to.
+      if (status === 'idle' || status === 'awaiting-consent') pendingTraits = traits;
+      else if (options.debug) console.warn('[anyreplay] identify() ignored: not recording');
+    },
+    track: (name, properties) => {
+      const payload = validateTrack(name, properties);
+      if (typeof payload === 'string') {
+        if (options.debug) console.warn(`[anyreplay] track() ignored: ${payload}`);
+        return;
+      }
+      emitCustom(TRACK_TAG, payload);
+    },
+    trackError: (error) => {
+      if (!options.recordErrors) return;
+      // While recording, through diagnostics: it owns the ceiling and the flag.
+      if (diagnostics) {
+        diagnostics.error(error);
+        return;
+      }
+      emitCustom(ERROR_TAG, errorPayload('error', error));
+      // Recording without diagnostics (no window to patch): flag it here.
+      if (status === 'recording') transport?.mergeFlags({ hasError: true });
+    },
+    stop: () => {
+      transport?.stop('stopped_by_page');
+      // Stopped before it ever started: a later consent(true) must not start
+      // what the page has already said it does not want.
+      if (status === 'idle' || status === 'awaiting-consent') status = 'stopped';
+      pendingTraits = undefined;
+    },
+    // Asked for by the page, so it skips our own backoff (never a server's Retry-After).
+    flush: () => transport?.flush(true) ?? Promise.resolve(),
+  };
+}
+
+function safeLocation(): string | undefined {
+  try {
+    return typeof location !== 'undefined' ? location.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
