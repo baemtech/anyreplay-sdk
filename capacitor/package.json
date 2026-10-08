@@ -1,0 +1,80 @@
+{
+  "name": "@anyreplay/capacitor",
+  "version": "0.2.3",
+  "description": "Session replay for Capacitor and Ionic apps: records the app's web view with @anyreplay/browser, plus the app id, version, lifecycle flushing, durable storage and the app's own styles, fonts and images.",
+  "license": "MIT",
+  "homepage": "https://anyreplay.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/baemtech/anyreplay-sdk.git",
+    "directory": "capacitor"
+  },
+  "bugs": {
+    "url": "https://github.com/baemtech/anyreplay-sdk/issues"
+  },
+  "keywords": [
+    "capacitor",
+    "capacitor-plugin",
+    "ionic",
+    "session-replay",
+    "session-recording",
+    "anyreplay"
+  ],
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./shell": {
+      "types": "./dist/shell.d.ts",
+      "import": "./dist/shell.js",
+      "require": "./dist/shell.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "ios/Sources",
+    "android/src/main",
+    "android/build.gradle",
+    "Package.swift",
+    "AnyreplayCapacitor.podspec",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "capacitor": {
+    "ios": {
+      "src": "ios"
+    },
+    "android": {
+      "src": "android"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@anyreplay/browser": "workspace:^"
+  },
+  "peerDependencies": {
+    "@capacitor/core": ">=7.0.0 <9.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/core": "8.5.2",
+    "jsdom": "25.0.1",
+    "tsup": "8.3.5",
+    "typescript": "5.8.3",
+    "vitest": "2.1.8"
+  }
+}
