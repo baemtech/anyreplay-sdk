@@ -1,0 +1,34 @@
+name: anyreplay_flutter
+description: Session replay for Flutter apps. Records the screen as a tree of words and boxes, never as screenshots, so every replay can be read and translated.
+version: 0.1.0
+homepage: https://anyreplay.com
+repository: https://github.com/baemtech/anyreplay-sdk/tree/main/flutter
+issue_tracker: https://github.com/baemtech/anyreplay-sdk/issues
+documentation: https://anyreplay.com/docs/install/flutter
+topics: [session-replay, analytics, translation, accessibility]
+
+# Pure Dart on top of Flutter: no native code of its own. The two device
+# plugins below supply the app id, the app version and the operating system
+# version; shared_preferences keeps the visitor id between launches.
+platforms:
+  android:
+  ios:
+
+environment:
+  sdk: ^3.6.0
+  flutter: ">=3.27.0"
+
+# Ranges rather than the newest of each, so an app a few Flutter releases
+# behind can still resolve them; only long-stable calls are used from each.
+dependencies:
+  device_info_plus: ">=11.0.0 <14.0.0"
+  flutter:
+    sdk: flutter
+  http: ">=1.2.0 <2.0.0"
+  package_info_plus: ">=8.0.0 <11.0.0"
+  shared_preferences: ^2.3.0
+
+dev_dependencies:
+  flutter_lints: ">=5.0.0 <7.0.0"
+  flutter_test:
+    sdk: flutter
