@@ -1,0 +1,186 @@
+import { describe, expect, it } from 'vitest';
+import { fieldValue, isSensitiveField, looksLikeCardNumber, maskCardRuns, mayBecomeCardNumber } from '../src/masking.js';
+
+/**
+ * The mobile floor: what a `TextInput` may never carry off the device, decided
+ * from the props alone.
+ *
+ * Every rule here has a twin in the browser SDK's `masking.ts`, expressed in
+ * the hints React Native gives instead of the attributes HTML gives. The
+ * negative cases matter as much as the positive ones: a false positive is a
+ * masked delivery address, which is a replay the customer paid for and cannot
+ * use.
+ */
+describe('fields no option can un-mask', () => {
+  it('masks a secure field, whatever else it says about itself', () => {
+    expect(isSensitiveField({ secureTextEntry: true })).toBe(true);
+  });
+
+  it('masks a credential named by iOS textContentType', () => {
+    for (const textContentType of ['password', 'newPassword', 'oneTimeCode']) {
+      expect(isSensitiveField({ textContentType }), textContentType).toBe(true);
+    }
+  });
+
+  it('masks every payment textContentType iOS can fill', () => {
+    for (const textContentType of [
+      'creditCardNumber', 'creditCardSecurityCode', 'creditCardExpiration',
+      'creditCardExpirationMonth', 'creditCardExpirationYear', 'creditCardName',
+      'creditCardGivenName', 'creditCardFamilyName', 'creditCardType',
+    ]) {
+      expect(isSensitiveField({ textContentType }), textContentType).toBe(true);
+    }
+  });
+
+  it('masks a credential or payment autoComplete token, in either spelling', () => {
+    for (const autoComplete of [
+      'password', 'password-new', 'new-password', 'current-password', 'sms-otp', 'one-time-code',
+      'cc-number', 'cc-csc', 'cc-exp', 'cc-exp-month', 'cc-exp-year', 'cc-name', 'cc-type',
+    ]) {
+      expect(isSensitiveField({ autoComplete }), autoComplete).toBe(true);
+    }
+    // The prop React Native called this before 0.66.
+    expect(isSensitiveField({ autoCompleteType: 'cc-number' })).toBe(true);
+  });
+
+  it("masks Android's password keyboard, which is what a shown password uses", () => {
+    expect(isSensitiveField({ keyboardType: 'visible-password' })).toBe(true);
+  });
+
+  it('masks a field whose label, placeholder or testID names what it holds', () => {
+    for (const props of [
+      { placeholder: 'Card number' },
+      { placeholder: 'CVV' },
+      { accessibilityLabel: 'Security code' },
+      { 'aria-label': 'IBAN' },
+      { testID: 'cvc-input' },
+      { testID: 'checkout-cardNumber' },
+      { placeholder: 'Şifre / password' },
+      { accessibilityLabel: 'One time code' },
+      { nativeID: 'user_pwd' },
+    ]) {
+      expect(isSensitiveField(props), JSON.stringify(props)).toBe(true);
+    }
+  });
+
+  it('masks a value shaped like a card number even with no hints at all', () => {
+    for (const number of ['4242424242424242', '4242 4242 4242 4242', '378282246310005']) {
+      expect(looksLikeCardNumber(number), number).toBe(true);
+    }
+  });
+
+  /**
+   * A post code is an address, not a payment detail; an email address and a
+   * phone number are contact details. Masking them would take the whole
+   * delivery step of a checkout replay with them, and the browser SDK does not
+   * mask them either.
+   */
+  it('leaves ordinary fields alone, post codes and contact details included', () => {
+    for (const props of [
+      {},
+      { textContentType: 'postalCode' },
+      { autoComplete: 'postal-code' },
+      { textContentType: 'emailAddress' },
+      { autoComplete: 'email' },
+      { textContentType: 'telephoneNumber' },
+      { autoComplete: 'tel' },
+      { autoComplete: 'username' },
+      { keyboardType: 'numeric' },
+      { keyboardType: 'number-pad' },
+      { keyboardType: 'email-address' },
+      { placeholder: 'Teslimat adresi' },
+      { placeholder: 'Quantity' },
+      { testID: 'discard-draft' },
+      { testID: 'scoreboard' },
+      { accessibilityLabel: 'Accounting period' },
+    ]) {
+      expect(isSensitiveField(props), JSON.stringify(props)).toBe(false);
+    }
+  });
+
+  it('leaves values that are not card numbers alone', () => {
+    for (const value of ['', '4242', 'hunter2', '4242424242424241', '05321234567', 'Ada Lovelace']) {
+      expect(looksLikeCardNumber(value), value).toBe(false);
+    }
+  });
+});
+
+describe('a card number being typed', () => {
+  it('is masked from the seventh digit, every keystroke after', () => {
+    const typed = '4242424242424242';
+    for (let n = 1; n <= typed.length; n += 1) {
+      const prefix = typed.slice(0, n);
+      expect(mayBecomeCardNumber(prefix) || looksLikeCardNumber(prefix), prefix).toBe(n > 6);
+    }
+    for (const prefix of ['4242 4242', '5555-5555-5', '378282246', '6011 1111 11']) {
+      expect(mayBecomeCardNumber(prefix), prefix).toBe(true);
+    }
+  });
+
+  it('leaves telephone numbers, quantities, postcodes and words alone', () => {
+    for (const value of [
+      '05321234567', '+90 532 123 45 67', '0044 20 7946 0958', '3', '34710', '424242',
+      '12345678', '9876543210', 'Ada Lovelace', '2026-09-18', '42424242424242424242',
+      '415-555-0100', '532 123 45 67',
+    ]) {
+      expect(mayBecomeCardNumber(value), value).toBe(false);
+    }
+  });
+});
+
+/**
+ * The same cases as the browser SDK's tests and the shared
+ * `card-run-vectors.json` (checked in conformance.test.ts); copied here so the
+ * public mirror, which has no shared fixtures, still tests the rule.
+ */
+describe('a card number inside longer text', () => {
+  it('has its digits starred and nothing else', () => {
+    for (const [text, recorded] of [
+      ['Hunter2Secret! card 5555555555554444', 'Hunter2Secret! card ****************'],
+      ['Thanks! card 5555 5555 5555 4444 exp soon', 'Thanks! card **** **** **** **** exp soon'],
+      ['Hunter2 4242 4242 4242 4242', 'Hunter2 **** **** **** ****'],
+      ['4242424242424242 12345', '**************** 12345'],
+      ['my card is 4242-4242-4242-4242.', 'my card is ****-****-****-****.'],
+      ['amex 3782 822463 10005 thanks', 'amex **** ****** ***** thanks'],
+      ['card 4242 4242 4242 4242', 'card **** **** **** ****'],
+      ['started typing 4242 4242 4', 'started typing **** **** *'],
+      ['line one\nmy card 4000056655665556\nline two', 'line one\nmy card ****************\nline two'],
+    ]) {
+      expect(maskCardRuns(text!), text).toBe(recorded);
+    }
+  });
+
+  it('leaves telephone numbers, dates, order numbers and short numbers alone', () => {
+    for (const text of [
+      'Call me on 0532 123 45 67', 'tel +90 532 123 45 67', 'due 2026-10-08', 'Row 3 — item #1003',
+      'order 1000234567', 'ref 12345678901234', 'qty 12, total 4500', 'bin 424242 only', 'no digits', '',
+    ]) {
+      expect(maskCardRuns(text), text).toBe(text);
+    }
+  });
+
+  it('never shows more than six of its digits while it is typed', () => {
+    const note = 'Kapıda öde.\nKartım 5555 5555 5555 4444, teşekkürler';
+    for (let n = 1; n <= note.length; n += 1) {
+      const typed = note.slice(0, n);
+      const sent = maskCardRuns(typed);
+      expect(sent.length, typed).toBe(typed.length);
+      expect(sent.replace(/[^0-9]/g, '').length, typed).toBeLessThanOrEqual(6);
+    }
+  });
+});
+
+describe('reading a field value', () => {
+  it('takes it from whichever of the three props carries it', () => {
+    expect(fieldValue({ text: 'a' })).toBe('a');
+    expect(fieldValue({ value: 'b' })).toBe('b');
+    expect(fieldValue({ defaultValue: 'c' })).toBe('c');
+    // `text` is what the native side reports; it wins over the React props.
+    expect(fieldValue({ text: 'a', value: 'b' })).toBe('a');
+  });
+
+  it('says nothing for a field holding nothing, or something that is not a string', () => {
+    expect(fieldValue({})).toBe('');
+    expect(fieldValue({ value: 42 })).toBe('');
+  });
+});
