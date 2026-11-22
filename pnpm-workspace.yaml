@@ -1,0 +1,7 @@
+packages:
+  - 'browser'
+  - 'react-native'
+  - 'electron'
+  - 'tauri'
+  - 'capacitor'
+  - 'cordova'

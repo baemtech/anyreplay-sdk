@@ -1,0 +1,40 @@
+// The Android half of @anyreplay/react-native: one small native module that
+// writes down crashes in the app's own Kotlin/Java code for the next launch
+// (docs/SDK-CONTRACT.md §8.3). Linked by React Native's autolinking (and
+// Expo's); built as part of the app, whose versions win where it sets them.
+// Optional: without it (Expo Go, an app not rebuilt) the JavaScript SDK
+// records exactly as before.
+
+def safeExtGet(prop, fallback) {
+    rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+}
+
+apply plugin: 'com.android.library'
+
+android {
+    namespace = "com.anyreplay.reactnative"
+    compileSdk = safeExtGet('compileSdkVersion', 35)
+    defaultConfig {
+        minSdkVersion safeExtGet('minSdkVersion', 24)
+        targetSdkVersion safeExtGet('targetSdkVersion', 35)
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+dependencies {
+    // The version is the app's: React Native's Gradle plugin resolves it.
+    implementation 'com.facebook.react:react-native:+'
+}
